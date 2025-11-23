@@ -4,7 +4,7 @@ const SPREADSHEET_ID = "1FotLFASWuFinDnvpyLTsyO51OpJeKWtuG31VFje3Oik"; // Only t
 const SICK_NOTE_FOLDER_ID = "1Wu_eoEQ3FmfrzOdAwJkqMu4sPucLRu_0";
 const SHEET_NAMES = {
   adherence: "Adherence Tracker",
-  warnings: "Warnings",
+  // database: "Data Base", // <-- DEPRECATED: We are replacing this
   employeesCore: "Employees_Core", // NEW: Public-facing info
   employeesPII: "Employees_PII",   // NEW: Restricted info (Salary, ID, Home Addr)
   assets: "Assets",                // NEW: Laptops, etc.
@@ -40,101 +40,34 @@ function doGet() {
 }
 // ================= WEB APP APIs (UPDATED) =================
 
-// - REPLACEMENT (PHASE 3 UPDATED)
-function webPunch(action, targetUserName, adminTimestamp, projectId) { // <-- Added projectId param
+// === Web App API for Punching ===
+function webPunch(action, targetUserName, adminTimestamp) { 
   try {
     const puncherEmail = Session.getActiveUser().getEmail().toLowerCase();
+    const resultMessage = punch(action, targetUserName, puncherEmail, adminTimestamp); // <-- Renamed to 'resultMessage'
     
-    // 1. Call the core punch logic (Attendance)
-    const resultMessage = punch(action, targetUserName, puncherEmail, adminTimestamp); 
+    // --- START: NEW STATUS LOGIC ---
+    // Get the user's new status after the punch
+    const userEmail = Session.getActiveUser().getEmail().toLowerCase(); // This is puncher
     
-    // 2. === PHASE 3: PROJECT LOGGING ===
-    if (projectId || action === "Logout") {
-      logProjectHours(targetUserName, action, projectId, adminTimestamp);
-    }
-    // ====================================
-
-    // Get the user's new status
-    const userEmail = Session.getActiveUser().getEmail().toLowerCase();
-    const ss = getSpreadsheet();
-    const dbSheet = getOrCreateSheet(ss, SHEET_NAMES.employeesCore); // Use Phase 1 sheet
+    const dbSheet = getOrCreateSheet(getSpreadsheet(), SHEET_NAMES.database);
+    const userData = getUserDataFromDb(dbSheet);
     
-    // Re-use logic to find target email
-    // Note: Since we moved to Employees_Core, we need a quick lookup. 
-    // Ideally, pass targetEmail from frontend, but for now we infer:
-    const data = dbSheet.getDataRange().getValues();
-    let targetEmail = "";
-    for(let i=1; i<data.length; i++) {
-      if(data[i][1] === targetUserName) { targetEmail = data[i][2]; break; }
-    }
-    if(!targetEmail) targetEmail = userEmail; // Fallback
-
+    const targetEmail = (targetUserName === userData.emailToName[userEmail]) ? userEmail : userData.nameToEmail[targetUserName];
+    
     const timeZone = Session.getScriptTimeZone();
     const now = adminTimestamp ? new Date(adminTimestamp) : new Date();
     const shiftDate = getShiftDate(now, SHIFT_CUTOFF_HOUR);
     const formattedDate = Utilities.formatDate(shiftDate, timeZone, "MM/dd/yyyy");
-    
+        
     const newStatus = getLatestPunchStatus(targetEmail, targetUserName, shiftDate, formattedDate);
+    // --- END: NEW STATUS LOGIC ---
 
-    return { message: resultMessage, newStatus: newStatus };
+    return { message: resultMessage, newStatus: newStatus }; // Return an object
 
   } catch (err) {
+    // Return error in the same object format
     return { message: "Error: " + err.message, newStatus: null };
-  }
-}
-
-// === NEW HELPER FOR PHASE 3 ===
-function logProjectHours(userName, action, newProjectId, customTime) {
-  const ss = getSpreadsheet();
-  const coreSheet = getOrCreateSheet(ss, SHEET_NAMES.employeesCore);
-  const logSheet = getOrCreateSheet(ss, SHEET_NAMES.projectLogs);
-  const data = coreSheet.getDataRange().getValues();
-  
-  // 1. Find User Row & Current State
-  let userRowIndex = -1;
-  let currentProjectId = "";
-  let lastActionTime = null;
-  let empID = "";
-
-  for (let i = 1; i < data.length; i++) {
-    if (data[i][1] === userName) { // Match Name
-      userRowIndex = i + 1;
-      empID = data[i][0]; // EmployeeID is Col A
-      // We use Column K (Index 10) for "CurrentProject" and L (Index 11) for "LastActionTime"
-      // If they don't exist yet, we treat them as empty.
-      currentProjectId = data[i][10] || ""; 
-      lastActionTime = data[i][11] ? new Date(data[i][11]) : null;
-      break;
-    }
-  }
-
-  if (userRowIndex === -1) return; // Should not happen
-
-  const now = customTime ? new Date(customTime) : new Date();
-
-  // 2. If they were working on a project, calculate duration and log it
-  if (currentProjectId && lastActionTime) {
-    const durationHours = (now.getTime() - lastActionTime.getTime()) / (1000 * 60 * 60);
-    
-    if (durationHours > 0) {
-      logSheet.appendRow([
-        `LOG-${new Date().getTime()}`, // LogID
-        empID,
-        currentProjectId,
-        new Date(), // Date of log
-        durationHours.toFixed(2) // Duration
-      ]);
-    }
-  }
-
-  // 3. Update State in Employees_Core
-  // If Logout, clear the project. If Login/Switch, set the new project.
-  if (action === "Logout") {
-    coreSheet.getRange(userRowIndex, 11).setValue(""); // Clear Project
-    coreSheet.getRange(userRowIndex, 12).setValue(""); // Clear Time
-  } else {
-    coreSheet.getRange(userRowIndex, 11).setValue(newProjectId); // Set New Project
-    coreSheet.getRange(userRowIndex, 12).setValue(now); // Set Start Time
   }
 }
 
@@ -2003,7 +1936,6 @@ function findOrCreateRow(sheet, userName, shiftDate, formattedDate) {
   return row;
 }
 
-// REPLACE this function
 function getOrCreateSheet(ss, name) {
   let sheet = ss.getSheetByName(name);
   if (!sheet) {
@@ -2053,18 +1985,10 @@ function getOrCreateSheet(ss, name) {
       sheet.setFrozenRows(1);
     }
 
-    
-
     // ==================================================
     // === EXISTING MODULES (PRESERVED) ===
     // ==================================================
 
-    else if (name === "Warnings") {
-      sheet.getRange("A1:H1").setValues([[
-        "WarningID", "EmployeeID", "Type", "Level", "Date", "Description", "Status", "IssuedBy"
-      ]]);
-      sheet.setFrozenRows(1);
-    }
     else if (name === SHEET_NAMES.schedule) {
       // 7-Column Layout
       sheet.getRange("A1:G1").setValues([["Name", "StartDate", "ShiftStartTime", "EndDate", "ShiftEndTime", "LeaveType", "agent email"]]);
@@ -2162,6 +2086,12 @@ function getOrCreateSheet(ss, name) {
       ]]);
       sheet.getRange("G:G").setNumberFormat("mm/dd/yyyy hh:mm:ss");
       sheet.getRange("J:J").setNumberFormat("mm/dd/yyyy hh:mm:ss");
+    }
+    else if (name === "Warnings") {
+      sheet.getRange("A1:H1").setValues([[
+        "WarningID", "EmployeeID", "Type", "Level", "Date", "Description", "Status", "IssuedBy"
+      ]]);
+      sheet.setFrozenRows(1);
     }
   }
 
@@ -4340,77 +4270,4 @@ function webGetMyWarnings() {
     }
   }
   return warnings;
-}
-
-// ==========================================
-// === PHASE 3: PROJECT MANAGEMENT API ===
-// ==========================================
-
-/**
- * Fetches all active projects.
- * Returns a list for dropdowns.
- */
-function webGetProjects() {
-  const ss = getSpreadsheet();
-  const pSheet = getOrCreateSheet(ss, SHEET_NAMES.projects); // Defined in Phase 1
-  const data = pSheet.getDataRange().getValues();
-  
-  const projects = [];
-  // Skip header (row 0)
-  for (let i = 1; i < data.length; i++) {
-    // ProjectID(0), Name(1), Manager(2), Roles(3)
-    if (data[i][0]) {
-      projects.push({
-        id: data[i][0],
-        name: data[i][1],
-        manager: data[i][2]
-      });
-    }
-  }
-  return projects;
-}
-
-/**
- * Admins create/update projects here.
- */
-function webSaveProject(projectData) {
-  const userEmail = Session.getActiveUser().getEmail().toLowerCase();
-  const ss = getSpreadsheet();
-  
-  // Security Check (Admin Only)
-  // You can reuse your existing checkAdmin() helper logic here if you extracted it, 
-  // or just look up the role again.
-  const coreSheet = getOrCreateSheet(ss, SHEET_NAMES.employeesCore);
-  const users = coreSheet.getDataRange().getValues();
-  let isAdmin = false;
-  for(let i=1; i<users.length; i++) {
-    if(users[i][2] == userEmail && (users[i][3] == 'admin' || users[i][3] == 'superadmin')) {
-      isAdmin = true; break;
-    }
-  }
-  if (!isAdmin) throw new Error("Permission denied.");
-
-  const pSheet = getOrCreateSheet(ss, SHEET_NAMES.projects);
-  
-  // Generate ID if new
-  const pid = projectData.id || `PRJ-${new Date().getTime()}`;
-  
-  // Check if updating existing
-  const data = pSheet.getDataRange().getValues();
-  let rowToUpdate = -1;
-  for (let i = 1; i < data.length; i++) {
-    if (data[i][0] === pid) {
-      rowToUpdate = i + 1;
-      break;
-    }
-  }
-
-  if (rowToUpdate > 0) {
-    pSheet.getRange(rowToUpdate, 2).setValue(projectData.name);
-    pSheet.getRange(rowToUpdate, 3).setValue(projectData.manager);
-  } else {
-    pSheet.appendRow([pid, projectData.name, projectData.manager, "All"]);
-  }
-  
-  return "Project saved successfully.";
 }
